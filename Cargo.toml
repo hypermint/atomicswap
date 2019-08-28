@@ -1,0 +1,21 @@
+[package]
+name = "atomicswap"
+version = "0.1.0"
+authors = ["Jun Kimura <junkxdev@gmail.com>"]
+edition = "2018"
+
+[features]
+emulation = []
+
+[dependencies]
+hmc = { git = "https://github.com/bluele/hypermint", branch = "develop" }
+serde = { version = "1.0.91", features = ["derive"] } 
+serde_json = "1.0.39"
+
+[dev-dependencies]
+hmemu = { git = "https://github.com/bluele/hmemu", branch = "develop" }
+erc20 = { git = "https://github.com/hypermint/erc20", branch = "master", features = ["emulation"] }
+erc721 = { git = "https://github.com/hypermint/erc721", branch = "master", features = ["emulation"] }
+
+[lib]
+crate-type = ["staticlib", "lib"]
