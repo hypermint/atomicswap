@@ -48,7 +48,7 @@ fn _open_swap() -> Result<(), String> {
         "transferFrom".as_bytes(),
         vec![
             bytes_to_hex_string(&sender).as_bytes(),
-            bytes_to_hex_string(&get_contract_address()).as_bytes(),
+            bytes_to_hex_string(&hmc::get_contract_address()?).as_bytes(),
             format!("{}", open_value).as_bytes(),
         ],
     )?;
@@ -113,14 +113,6 @@ fn is_swap_open(swap_id: &[u8]) -> Result<(), String> {
         Some(States::OPEN) => Ok(()),
         s => Err(format!("swap state must be OPEN, but got {:?}", s)),
     }
-}
-
-fn get_contract_address() -> Vec<u8> {
-    // TODO returns valid address of this contract
-    let addr: Address = *b"00000000000000000001";
-    let mut v = vec![];
-    v.extend_from_slice(&addr);
-    v
 }
 
 fn bytes_to_hex_string(b: &[u8]) -> String {
