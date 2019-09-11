@@ -13,24 +13,19 @@ pub fn init() -> R<i32> {
 
 pub fn open_swap() -> R<i32> {
     let sender = api::get_sender()?;
-    println!(
-        "OPEN_SWAP sender={:X?} contract_address={:X?}",
-        sender,
-        api::get_contract_address()?
-    );
     let swap_id: Vec<u8> = api::get_arg(0)?;
     let open_value: u64 = api::get_arg(1)?;
     // ERC20
-    let open_contract: Address = api::get_arg(2)?;
+    let open_contract_address: Address = api::get_arg(2)?;
     let close_value: u64 = api::get_arg(3)?;
     let close_trader: Address = api::get_arg(4)?;
     // ERC721
-    let close_contract: Address = api::get_arg(5)?;
+    let close_contract_address: Address = api::get_arg(5)?;
 
     // open-contract transfer to this contract
     let _: Vec<u8> = api::call_contract(
-        &open_contract,
-        "transferFrom".as_bytes(),
+        &open_contract_address,
+        b"transferFrom",
         vec![
             &sender.to_bytes(),
             &api::get_contract_address()?.to_bytes(),
@@ -39,12 +34,12 @@ pub fn open_swap() -> R<i32> {
     )?;
 
     let swap = Swap {
-        open_value: open_value,
+        open_value,
         open_trader: sender,
-        open_contract_address: open_contract,
-        close_value: close_value,
-        close_trader: close_trader,
-        close_contract_address: close_contract,
+        open_contract_address,
+        close_value,
+        close_trader,
+        close_contract_address,
     };
 
     set_swap(&swap_id, &swap)?;
@@ -74,7 +69,7 @@ pub fn close_swap() -> R<i32> {
 
     let _: Vec<u8> = api::call_contract(
         &swap.close_contract_address,
-        "transferFrom".as_bytes(),
+        b"transferFrom",
         vec![
             &sender.to_bytes(),
             &swap.open_trader.to_bytes(),
@@ -83,7 +78,7 @@ pub fn close_swap() -> R<i32> {
     )?;
     let _: Vec<u8> = api::call_contract(
         &swap.open_contract_address,
-        "transfer".as_bytes(),
+        b"transfer",
         vec![&swap.close_trader.to_bytes(), &swap.open_value.to_bytes()],
     )?;
 
@@ -98,19 +93,6 @@ fn check_swap_open(swap_id: &[u8]) -> Result<(), Error> {
             s
         ))),
     }
-}
-
-fn bytes_to_hex_string(b: &[u8]) -> String {
-    let mut w = String::with_capacity(b.as_ref().len() * 2 + 2);
-    static CHARS: &'static [u8] = b"0123456789abcdef";
-
-    w.push_str("0x");
-    for &byte in b.as_ref().iter() {
-        w.push(CHARS[(byte >> 4) as usize].into());
-        w.push(CHARS[(byte & 0xf) as usize].into());
-    }
-
-    w
 }
 
 fn set_swap(swap_id: &[u8], swap: &Swap) -> Result<(), Error> {
@@ -160,15 +142,15 @@ fn get_swap_states(swap_id: &[u8]) -> Option<States> {
 }
 
 fn make_swaps_key(swap_id: &[u8]) -> Vec<u8> {
-    make_key_by_parts(vec!["swaps".as_bytes(), swap_id])
+    make_key_by_parts(vec![b"swaps", swap_id])
 }
 
 fn make_swap_states_key(swap_id: &[u8]) -> Vec<u8> {
-    make_key_by_parts(vec!["swapStates".as_bytes(), swap_id])
+    make_key_by_parts(vec![b"swapStates", swap_id])
 }
 
 fn make_key_by_parts(parts: Vec<&[u8]>) -> Vec<u8> {
-    parts.join(&('/' as u8))
+    parts.join(&b'/')
 }
 
 #[cfg(test)]
