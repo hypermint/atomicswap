@@ -1,25 +1,53 @@
-extern crate hmc;
+extern crate hmcdk;
+use hmcdk::api;
+use hmcdk::error;
+use hmcdk::prelude::*;
 #[macro_use]
 extern crate serde;
 mod json;
 
-#[cfg_attr(not(feature = "emulation"), no_mangle)]
-pub fn init() -> i32 {
-    0
+#[contract]
+pub fn init() -> R<i32> {
+    Ok(None)
 }
 
-#[cfg_attr(not(feature = "emulation"), no_mangle)]
-pub fn open_swap() -> i32 {
-    match _open_swap() {
-        Ok(_) => 0,
-        Err(e) => {
-            hmc::revert(e);
-            -1
-        }
-    }
-}
+pub fn open_swap() -> R<i32> {
+    let sender = api::get_sender()?;
+    println!("OPEN_SWAP sender={:X?} contract_address={:X?}", sender, api::get_contract_address()?);
+    let swap_id: Vec<u8> = api::get_arg(0)?;
+    let open_value: u64 = api::get_arg(1)?;
+    // ERC20
+    let open_contract: Address = api::get_arg(2)?;
+    let close_value: u64 = api::get_arg(3)?;
+    let close_trader: Address = api::get_arg(4)?;
+    // ERC721
+    let close_contract: Address = api::get_arg(5)?;
 
-type Address = [u8; 20];
+    // open-contract transfer to this contract
+    let _: Vec<u8> = api::call_contract(
+        &open_contract,
+        "transferFrom".as_bytes(),
+        vec![
+            &sender.to_bytes(),
+            &api::get_contract_address()?.to_bytes(),
+            &open_value.to_bytes(),
+        ],
+    )?;
+
+    let swap = Swap {
+        open_value: open_value,
+        open_trader: sender,
+        open_contract_address: open_contract,
+        close_value: close_value,
+        close_trader: close_trader,
+        close_contract_address: close_contract,
+    };
+
+    set_swap(&swap_id, &swap)?;
+    set_swap_states(&swap_id, States::OPEN);
+
+    Ok(None)
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Swap {
@@ -31,87 +59,40 @@ struct Swap {
     close_contract_address: Address,
 }
 
-fn _open_swap() -> Result<(), String> {
-    let sender = hmc::get_sender()?;
-    let swap_id = hmc::get_arg(0)?;
-    let open_value = hmc::get_arg_str(1)?.parse::<u64>().unwrap();
-    // ERC20
-    let open_contract = hmc::hex_to_bytes(hmc::get_arg_str(2)?.as_ref());
-    let close_value = hmc::get_arg_str(3)?.parse::<u64>().unwrap();
-    let close_trader = hmc::hex_to_bytes(hmc::get_arg_str(4)?.as_ref());
-    // ERC721
-    let close_contract = hmc::hex_to_bytes(hmc::get_arg_str(5)?.as_ref());
-
-    // open-contract transfer to this contract
-    hmc::call_contract(
-        &open_contract,
-        "transferFrom".as_bytes(),
-        vec![
-            bytes_to_hex_string(&sender).as_bytes(),
-            bytes_to_hex_string(&hmc::get_contract_address()?).as_bytes(),
-            format!("{}", open_value).as_bytes(),
-        ],
-    )?;
-
-    let swap = Swap {
-        open_value: open_value,
-        open_trader: sender,
-        open_contract_address: slice_to_address(&open_contract)?,
-        close_value: close_value,
-        close_trader: slice_to_address(&close_trader)?,
-        close_contract_address: slice_to_address(&close_contract)?,
-    };
-
-    set_swap(&swap_id, &swap)?;
-    set_swap_states(&swap_id, States::OPEN);
-
-    Ok(())
-}
-
-#[cfg_attr(not(feature = "emulation"), no_mangle)]
-pub fn close_swap() -> i32 {
-    match _close_swap() {
-        Ok(_) => 0,
-        Err(e) => {
-            hmc::revert(e);
-            -1
-        }
-    }
-}
-
-fn _close_swap() -> Result<(), String> {
-    let sender = hmc::get_sender()?; // this equals closer
-    let swap_id = hmc::get_arg(0)?;
-    is_swap_open(&swap_id)?;
+#[contract]
+pub fn close_swap() -> R<i32> {
+    let sender = api::get_sender()?; // this means closer address
+    let swap_id: Vec<u8> = api::get_arg(0)?;
+    check_swap_open(&swap_id)?;
 
     let swap = get_swap(&swap_id)?;
     set_swap_states(&swap_id, States::CLOSED);
 
-    hmc::call_contract(
+    let _: Vec<u8> = api::call_contract(
         &swap.close_contract_address,
         "transferFrom".as_bytes(),
         vec![
-            bytes_to_hex_string(&sender).as_bytes(),
-            bytes_to_hex_string(&swap.open_trader).as_bytes(),
-            format!("{}", swap.close_value).as_bytes(),
+            &sender.to_bytes(),
+            &swap.open_trader.to_bytes(),
+            &swap.close_value.to_bytes(),
         ],
     )?;
-    hmc::call_contract(
+    let _: Vec<u8> = api::call_contract(
         &swap.open_contract_address,
         "transfer".as_bytes(),
         vec![
-            bytes_to_hex_string(&swap.close_trader).as_bytes(),
-            format!("{}", swap.open_value).as_bytes(),
+            &swap.close_trader.to_bytes(),
+            &swap.open_value.to_bytes(),
         ],
     )?;
 
-    Ok(())
+    Ok(None)
 }
 
-fn is_swap_open(swap_id: &[u8]) -> Result<(), String> {
+fn check_swap_open(swap_id: &[u8]) -> Result<(), Error> {
     match get_swap_states(swap_id) {
         Some(States::OPEN) => Ok(()),
-        s => Err(format!("swap state must be OPEN, but got {:?}", s)),
+        s => Err(error::from_str(format!("swap state must be OPEN, but got {:?}", s))),
     }
 }
 
@@ -128,27 +109,16 @@ fn bytes_to_hex_string(b: &[u8]) -> String {
     w
 }
 
-fn slice_to_address(s: &[u8]) -> Result<Address, String> {
-    if s.len() != 20 {
-        Err(format!("invalid byte length: {}", s.len()))
-    } else {
-        let mut addr: Address = Default::default();
-        addr.copy_from_slice(s);
-        Ok(addr)
-    }
-}
-
-fn set_swap(swap_id: &[u8], swap: &Swap) -> Result<(), String> {
+fn set_swap(swap_id: &[u8], swap: &Swap) -> Result<(), Error> {
     let b = json::serialize(swap)?;
     let key = make_swaps_key(swap_id);
-    hmc::write_state(&key, &b);
+    api::write_state(&key, &b);
     Ok(())
 }
 
-fn get_swap(swap_id: &[u8]) -> Result<Swap, String> {
+fn get_swap(swap_id: &[u8]) -> Result<Swap, Error> {
     let key = make_swaps_key(swap_id);
-    let b = hmc::read_state(&key)?;
-
+    let b: Vec<u8> = api::read_state(&key)?;
     json::deserialize(&b)
 }
 
@@ -174,12 +144,12 @@ fn state_from_u8(n: u8) -> Option<States> {
 
 fn set_swap_states(swap_id: &[u8], state: States) {
     let key = make_swap_states_key(swap_id);
-    hmc::write_state(&key, &[state as u8])
+    api::write_state(&key, &[state as u8])
 }
 
 fn get_swap_states(swap_id: &[u8]) -> Option<States> {
     let key = make_swap_states_key(swap_id);
-    match hmc::read_state(&key) {
+    match api::read_state::<Vec<u8>>(&key) {
         Ok(v) => state_from_u8(v[0]),
         Err(_) => None,
     }
@@ -201,134 +171,143 @@ fn make_key_by_parts(parts: Vec<&[u8]>) -> Vec<u8> {
 mod tests {
     extern crate erc20;
     extern crate erc721;
+    extern crate hmemu;
     use super::*;
+    use hmemu::*;
+    use hmemu::types::ArgsBuilder;
 
-    const SENDER1_ADDR: &str = "0x1221a0726d56aedea9dbe2522ddae3dd8ed0f36c";
-    const SENDER2_ADDR: &str = "0xd8eba1f372b9e0d378259f150d52c2e6c2e4109a";
+    const SENDER1: Address = *b"00000000000000000001";
+    const SENDER2: Address = *b"00000000000000000002";
 
     #[test]
-    fn it_works() {
-        let sender = hmc::hex_to_bytes(SENDER1_ADDR);
-
-        hmemu::run_process(|| hmemu::call_contract(&sender, Vec::<String>::new(), || Ok(init())))
+    fn init_test() {
+        let _ = hmemu::run_process(|| hmemu::call_contract(&SENDER1, vec![], || Ok(init())))
             .unwrap();
     }
 
     #[test]
-    fn hex_string_test() {
-        let sender1 = hmc::hex_to_bytes(SENDER1_ADDR);
-        let s1 = bytes_to_hex_string(&sender1);
-        assert_eq!(SENDER1_ADDR, s1);
-    }
-
-    #[test]
     fn swap_test() {
-        let sender1 = hmc::hex_to_bytes(SENDER1_ADDR);
-        let sender2 = hmc::hex_to_bytes(SENDER2_ADDR);
-
-        const CONTRACT_SWAP: Address = *b"00000000000000000001";
-        const CONTRACT_TOKEN_OPEN: Address = *b"00000000000000000010";
-        const CONTRACT_TOKEN_CLOSE: Address = *b"00000000000000000011";
-        const TOKEN1: &str = "1";
+        const CONTRACT_SWAP: Address = *b"00000000000000000100";
+        const CONTRACT_TOKEN_OPEN: Address = *b"00000000000000000101";
+        const CONTRACT_TOKEN_CLOSE: Address = *b"00000000000000000110";
+        const TOKEN1: u64 = 1;
+        let swap_id = b"swap1".to_vec();
 
         hmemu::run_process(|| {
             hmemu::register_contract_function(
                 CONTRACT_TOKEN_OPEN,
                 "transfer".to_string(),
-                erc20::transfer,
+                contract_fn!(erc20::transfer),
             );
             hmemu::register_contract_function(
                 CONTRACT_TOKEN_OPEN,
                 "transferFrom".to_string(),
-                erc20::transferFrom,
+                contract_fn!(erc20::transferFrom),
             );
             hmemu::register_contract_function(
                 CONTRACT_TOKEN_CLOSE,
                 "transferFrom".to_string(),
-                erc721::transferFrom,
+                contract_fn!(erc721::transferFrom),
             );
 
             {
                 hmemu::init_contract_address(&CONTRACT_TOKEN_OPEN)?;
-                hmemu::call_contract(&sender1, Vec::<String>::new(), || Ok(erc20::init()))?;
+                hmemu::call_contract(&SENDER1, vec![], || Ok(erc20::init()?))?;
             }
             {
                 hmemu::init_contract_address(&CONTRACT_TOKEN_CLOSE)?;
-                hmemu::call_contract(&sender2, Vec::<String>::new(), || Ok(erc721::init()))?;
-                hmemu::call_contract(&sender2, vec![SENDER2_ADDR, TOKEN1], || {
-                    assert_eq!(0, erc721::mint());
-                    Ok(())
+                hmemu::call_contract(&SENDER2, vec![], || Ok(erc721::init()?))?;
+
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(SENDER2);
+                    args.push(TOKEN1);
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER2, args, || {
+                    Ok(erc721::mint()?)
                 })?;
             }
             {
                 hmemu::init_contract_address(&CONTRACT_TOKEN_OPEN)?;
-                hmemu::call_contract(&sender1, Vec::<String>::new(), || {
-                    assert_eq!(0, erc20::balanceOf());
-                    let balance = hmemu::get_return_value()?;
-                    assert_eq!(100000 * 10, bytes_to_i64(&balance));
+                hmemu::call_contract(&SENDER1, vec![], || {
+                    let balance = erc20::balanceOf()?.unwrap();
+                    assert_eq!(100000 * 10, balance);
                     Ok(())
                 })?;
             }
             { // approve a token on open-contract
                 hmemu::init_contract_address(&CONTRACT_TOKEN_OPEN)?;
-                let swap_address = bytes_to_hex_string(&CONTRACT_SWAP);
-                hmemu::call_contract(&sender1, vec![swap_address.as_str(), "100"], || {
-                    assert_eq!(0, erc20::approve());
-                    Ok(())
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(CONTRACT_SWAP);
+                    args.push(100i64);
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER1, args, || {
+                    erc20::approve()
                 })?;
             }
+
             { // open a swap contract. (sender1 is opener)
                 hmemu::init_contract_address(&CONTRACT_SWAP)?;
-                let open_address = bytes_to_hex_string(&CONTRACT_TOKEN_OPEN);
-                let close_address = bytes_to_hex_string(&CONTRACT_TOKEN_CLOSE);
-                let args = vec![
-                    "swap1",                // swap_id
-                    "100",                  // open_value
-                    open_address.as_str(),  // open_contract
-                    "1",                    // close_value(tokenID)
-                    SENDER2_ADDR,           // close_trader
-                    close_address.as_str(), // close_contract
-                ];
-                hmemu::call_contract(&sender1, args, || {
-                    assert_eq!(0, open_swap());
-                    Ok(())
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(swap_id.clone()); // swap_id
+                    args.push(100i64); // open_value
+                    args.push(CONTRACT_TOKEN_OPEN); // open_contract
+                    args.push(TOKEN1); // close_value(tokenID)
+                    args.push(SENDER2); // close_trader
+                    args.push(CONTRACT_TOKEN_CLOSE); // close_contract
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER1, args, || {
+                    open_swap()
                 })?;
             }
             { // approve a token on close-contract
                 hmemu::init_contract_address(&CONTRACT_TOKEN_CLOSE)?;
-                let swap_address = bytes_to_hex_string(&CONTRACT_SWAP);
-                hmemu::call_contract(&sender2, vec![swap_address.as_str(), "1"], || {
-                    assert_eq!(0, erc721::approve());
-                    Ok(())
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(CONTRACT_SWAP);
+                    args.push(TOKEN1);
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER2, args, || {
+                    erc721::approve()
                 })?;
             }
             { // close swap contract. (sender2 is closer)
                 hmemu::init_contract_address(&CONTRACT_SWAP)?;
-                hmemu::call_contract(&sender2, vec!["swap1"], || {
-                    assert_eq!(0, close_swap());
-                    Ok(())
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(swap_id.clone());
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER2, args, || {
+                    close_swap()
                 })?;
             }
             { // check if each balance is valid
                 hmemu::init_contract_address(&CONTRACT_TOKEN_OPEN)?;                
-                hmemu::call_contract(&sender1, Vec::<String>::new(), || {
-                    assert_eq!(0, erc20::balanceOf());
-                    let balance = hmemu::get_return_value()?;
-                    assert_eq!(100000 * 10 - 100, bytes_to_i64(&balance));
+                hmemu::call_contract(&SENDER1, vec![], || {
+                    assert_eq!(Some(100000 * 10 - 100), erc20::balanceOf()?);
                     Ok(())
                 })?;
-                hmemu::call_contract(&sender2, Vec::<String>::new(), || {
-                    assert_eq!(0, erc20::balanceOf());
-                    let balance = hmemu::get_return_value()?;
-                    assert_eq!(100, bytes_to_i64(&balance));
+                hmemu::call_contract(&SENDER2, vec![], || {
+                    assert_eq!(Some(100), erc20::balanceOf()?);
                     Ok(())
                 })?;
 
                 hmemu::init_contract_address(&CONTRACT_TOKEN_CLOSE)?;                
-                hmemu::call_contract(&sender1, vec!["1"], || {
-                    assert_eq!(0, erc721::ownerOf());
-                    let owner = hmemu::get_return_value()?;
-                    assert_eq!(sender1, owner);
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(TOKEN1);
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER1, args, || {
+                    let owner = erc721::ownerOf()?.unwrap();
+                    assert_eq!(SENDER1, owner);
                     Ok(())
                 })?;
             }
@@ -336,12 +315,5 @@ mod tests {
             Ok(())
         })
         .unwrap();
-    }
-
-    fn bytes_to_i64(bs: &[u8]) -> i64 {
-        let mut v: [u8; 8] = Default::default();
-        v.copy_from_slice(bs);
-
-        i64::from_be_bytes(v)
     }
 }

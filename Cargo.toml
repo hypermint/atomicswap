@@ -8,12 +8,12 @@ edition = "2018"
 emulation = []
 
 [dependencies]
-hmc = { git = "https://github.com/bluele/hypermint", branch = "develop" }
+hmcdk = { git = "https://github.com/bluele/hypermint", tag = "v0.4.3" }
 serde = { version = "1.0.91", features = ["derive"] } 
 serde_json = "1.0.39"
 
 [dev-dependencies]
-hmemu = { git = "https://github.com/bluele/hmemu", branch = "develop" }
+hmemu = { git = "https://github.com/bluele/hmemu", tag = "v0.0.3" }
 erc20 = { git = "https://github.com/hypermint/erc20", branch = "master", features = ["emulation"] }
 erc721 = { git = "https://github.com/hypermint/erc721", branch = "master", features = ["emulation"] }
 
