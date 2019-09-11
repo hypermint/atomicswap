@@ -1,0 +1,36 @@
+version: 2
+
+jobs:
+  test:
+    working_directory: /go/src/github.com/hypermint/atomicswap
+    docker:
+      - image: hypermint/go-rust:v0.2.0
+    environment:
+      GO111MODULE: "on"
+    steps:
+      - checkout
+      - run:
+          name: "setup lint tools"
+          command: |
+            make lint-tools
+      - run:
+          name: "lint"
+          command: |
+            make lint
+      - run:
+          name: "build"
+          command: |
+            cargo build
+      - run:
+          name: "test"
+          command: |
+            cargo test
+
+workflows:
+  version: 2
+  test-suite:
+    jobs:
+      - test:
+          filters:
+            tags:
+              only: /.*/

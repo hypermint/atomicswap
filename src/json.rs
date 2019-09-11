@@ -1,5 +1,5 @@
-use hmcdk::prelude::*;
 use hmcdk::error;
+use hmcdk::prelude::*;
 
 pub fn deserialize<'a, T>(b: &'a [u8]) -> Result<T, Error>
 where
