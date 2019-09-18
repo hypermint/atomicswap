@@ -11,6 +11,7 @@ pub fn init() -> R<i32> {
     Ok(None)
 }
 
+#[contract]
 pub fn open_swap() -> R<i32> {
     let sender = api::get_sender()?;
     let swap_id: Vec<u8> = api::get_arg(0)?;
