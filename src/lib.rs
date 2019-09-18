@@ -23,6 +23,10 @@ pub fn open_swap() -> R<i32> {
     // ERC721
     let close_contract_address: Address = api::get_arg(5)?;
 
+    if get_swap_states(&swap_id).is_some() {
+        return Err(error::from_str("this swap_id already exists"));
+    }
+
     // open-contract transfer to this contract
     let _: Vec<u8> = api::call_contract(
         &open_contract_address,
@@ -49,7 +53,7 @@ pub fn open_swap() -> R<i32> {
     Ok(None)
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct Swap {
     open_value: u64,
     open_trader: Address,
@@ -57,6 +61,36 @@ struct Swap {
     close_value: u64,
     close_trader: Address,
     close_contract_address: Address,
+}
+
+#[contract]
+pub fn get_swap_info() -> R<Vec<u8>> {
+    let swap_id: Vec<u8> = api::get_arg(0)?;
+    let swap = get_swap(&swap_id)?;
+    Ok(Some(json::serialize(&swap)?))
+}
+
+#[contract]
+pub fn get_swap_status() -> R<u8> {
+    let swap_id: Vec<u8> = api::get_arg(0)?;
+    match get_swap_states(&swap_id) {
+        Some(v) => Ok(Some(v as u8)),
+        None => Err(error::from_str("swap not found")),
+    }
+}
+
+#[contract]
+pub fn cancel_swap() -> R<u32> {
+    let sender = api::get_sender()?;
+    let swap_id: Vec<u8> = api::get_arg(0)?;
+    check_swap_open(&swap_id)?;
+    let swap = get_swap(&swap_id)?;
+    if swap.open_trader != sender {
+        Err(error::from_str("unexpected sender"))
+    } else {
+        set_swap_states(&swap_id, States::CANCELED);
+        Ok(None)
+    }
 }
 
 #[contract]
@@ -109,13 +143,13 @@ fn get_swap(swap_id: &[u8]) -> Result<Swap, Error> {
     json::deserialize(&b)
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 #[repr(u8)]
 enum States {
     INVALID,
     OPEN,
     CLOSED,
-    EXPIRED,
+    CANCELED,
 }
 
 fn state_from_u8(n: u8) -> Option<States> {
@@ -124,7 +158,7 @@ fn state_from_u8(n: u8) -> Option<States> {
         0 => Some(INVALID),
         1 => Some(OPEN),
         2 => Some(CLOSED),
-        3 => Some(EXPIRED),
+        3 => Some(CANCELED),
         _ => None,
     }
 }
@@ -165,6 +199,10 @@ mod tests {
 
     const SENDER1: Address = *b"00000000000000000001";
     const SENDER2: Address = *b"00000000000000000002";
+    const CONTRACT_SWAP: Address = *b"00000000000000000100";
+    const CONTRACT_TOKEN_OPEN: Address = *b"00000000000000000101";
+    const CONTRACT_TOKEN_CLOSE: Address = *b"00000000000000000110";
+    const TOKEN1: u64 = 1;
 
     #[test]
     fn init_test() {
@@ -172,93 +210,130 @@ mod tests {
             hmemu::run_process(|| hmemu::call_contract(&SENDER1, vec![], || Ok(init()))).unwrap();
     }
 
+    fn setup_swap(swap_id: Vec<u8>) -> Result<()> {
+        hmemu::register_contract_function(
+            CONTRACT_TOKEN_OPEN,
+            "transfer".to_string(),
+            contract_fn!(erc20::transfer),
+        );
+        hmemu::register_contract_function(
+            CONTRACT_TOKEN_OPEN,
+            "transferFrom".to_string(),
+            contract_fn!(erc20::transferFrom),
+        );
+        hmemu::register_contract_function(
+            CONTRACT_TOKEN_CLOSE,
+            "transferFrom".to_string(),
+            contract_fn!(erc721::transferFrom),
+        );
+        {
+            hmemu::init_contract_address(&CONTRACT_TOKEN_OPEN)?;
+            hmemu::call_contract(&SENDER1, vec![], || Ok(erc20::init()?))?;
+        }
+        {
+            hmemu::init_contract_address(&CONTRACT_TOKEN_CLOSE)?;
+            hmemu::call_contract(&SENDER2, vec![], || Ok(erc721::init()?))?;
+
+            let args = {
+                let mut args = ArgsBuilder::new();
+                args.push(SENDER2);
+                args.push(TOKEN1);
+                args.convert_to_vec()
+            };
+            hmemu::call_contract(&SENDER2, args, || Ok(erc721::mint()?))?;
+        }
+        {
+            hmemu::init_contract_address(&CONTRACT_TOKEN_OPEN)?;
+            hmemu::call_contract(&SENDER1, vec![], || {
+                let balance = erc20::balanceOf()?.unwrap();
+                assert_eq!(100000 * 10, balance);
+                Ok(())
+            })?;
+        }
+        {
+            // approve a token on open-contract
+            hmemu::init_contract_address(&CONTRACT_TOKEN_OPEN)?;
+            let args = {
+                let mut args = ArgsBuilder::new();
+                args.push(CONTRACT_SWAP);
+                args.push(100u64);
+                args.convert_to_vec()
+            };
+            hmemu::call_contract(&SENDER1, args, || erc20::approve())?;
+        }
+        {
+            // open a swap contract. (sender1 is opener)
+            hmemu::init_contract_address(&CONTRACT_SWAP)?;
+            let args = {
+                let mut args = ArgsBuilder::new();
+                args.push(swap_id.clone()); // swap_id
+                args.push(100u64); // open_value
+                args.push(CONTRACT_TOKEN_OPEN); // open_contract
+                args.push(TOKEN1); // close_value(tokenID)
+                args.push(SENDER2); // close_trader
+                args.push(CONTRACT_TOKEN_CLOSE); // close_contract
+                args.convert_to_vec()
+            };
+            hmemu::call_contract(&SENDER1, args, || open_swap())?;
+        }
+        {
+            // check if swap status is valid
+            hmemu::init_contract_address(&CONTRACT_SWAP)?;
+            let args = {
+                let mut args = ArgsBuilder::new();
+                args.push(swap_id.clone()); // swap_id
+                args.convert_to_vec()
+            };
+            hmemu::call_contract(&SENDER1, args, || {
+                let status = get_swap_status()?.unwrap();
+                assert_eq!(Some(States::OPEN), state_from_u8(status));
+                Ok(())
+            })?;
+        }
+        {
+            // check if swap info is valid
+            hmemu::init_contract_address(&CONTRACT_SWAP)?;
+            let args = {
+                let mut args = ArgsBuilder::new();
+                args.push(swap_id.clone()); // swap_id
+                args.convert_to_vec()
+            };
+            hmemu::call_contract(&SENDER1, args, || {
+                let swap_bytes = get_swap_info()?.unwrap();
+                let swap: Swap = json::deserialize(&swap_bytes)?;
+                assert_eq!(
+                    swap,
+                    Swap {
+                        open_value: 100u64,
+                        open_trader: SENDER1,
+                        open_contract_address: CONTRACT_TOKEN_OPEN,
+                        close_value: TOKEN1,
+                        close_trader: SENDER2,
+                        close_contract_address: CONTRACT_TOKEN_CLOSE,
+                    }
+                );
+                Ok(())
+            })?;
+        }
+        {
+            // approve a token on close-contract
+            hmemu::init_contract_address(&CONTRACT_TOKEN_CLOSE)?;
+            let args = {
+                let mut args = ArgsBuilder::new();
+                args.push(CONTRACT_SWAP);
+                args.push(TOKEN1);
+                args.convert_to_vec()
+            };
+            hmemu::call_contract(&SENDER2, args, || erc721::approve())?;
+        }
+        Ok(())
+    }
+
     #[test]
-    fn swap_test() {
-        const CONTRACT_SWAP: Address = *b"00000000000000000100";
-        const CONTRACT_TOKEN_OPEN: Address = *b"00000000000000000101";
-        const CONTRACT_TOKEN_CLOSE: Address = *b"00000000000000000110";
-        const TOKEN1: u64 = 1;
+    fn standard_swap_test() {
         let swap_id = b"swap1".to_vec();
-
         hmemu::run_process(|| {
-            hmemu::register_contract_function(
-                CONTRACT_TOKEN_OPEN,
-                "transfer".to_string(),
-                contract_fn!(erc20::transfer),
-            );
-            hmemu::register_contract_function(
-                CONTRACT_TOKEN_OPEN,
-                "transferFrom".to_string(),
-                contract_fn!(erc20::transferFrom),
-            );
-            hmemu::register_contract_function(
-                CONTRACT_TOKEN_CLOSE,
-                "transferFrom".to_string(),
-                contract_fn!(erc721::transferFrom),
-            );
-
-            {
-                hmemu::init_contract_address(&CONTRACT_TOKEN_OPEN)?;
-                hmemu::call_contract(&SENDER1, vec![], || Ok(erc20::init()?))?;
-            }
-            {
-                hmemu::init_contract_address(&CONTRACT_TOKEN_CLOSE)?;
-                hmemu::call_contract(&SENDER2, vec![], || Ok(erc721::init()?))?;
-
-                let args = {
-                    let mut args = ArgsBuilder::new();
-                    args.push(SENDER2);
-                    args.push(TOKEN1);
-                    args.convert_to_vec()
-                };
-                hmemu::call_contract(&SENDER2, args, || Ok(erc721::mint()?))?;
-            }
-            {
-                hmemu::init_contract_address(&CONTRACT_TOKEN_OPEN)?;
-                hmemu::call_contract(&SENDER1, vec![], || {
-                    let balance = erc20::balanceOf()?.unwrap();
-                    assert_eq!(100000 * 10, balance);
-                    Ok(())
-                })?;
-            }
-            {
-                // approve a token on open-contract
-                hmemu::init_contract_address(&CONTRACT_TOKEN_OPEN)?;
-                let args = {
-                    let mut args = ArgsBuilder::new();
-                    args.push(CONTRACT_SWAP);
-                    args.push(100i64);
-                    args.convert_to_vec()
-                };
-                hmemu::call_contract(&SENDER1, args, || erc20::approve())?;
-            }
-
-            {
-                // open a swap contract. (sender1 is opener)
-                hmemu::init_contract_address(&CONTRACT_SWAP)?;
-                let args = {
-                    let mut args = ArgsBuilder::new();
-                    args.push(swap_id.clone()); // swap_id
-                    args.push(100i64); // open_value
-                    args.push(CONTRACT_TOKEN_OPEN); // open_contract
-                    args.push(TOKEN1); // close_value(tokenID)
-                    args.push(SENDER2); // close_trader
-                    args.push(CONTRACT_TOKEN_CLOSE); // close_contract
-                    args.convert_to_vec()
-                };
-                hmemu::call_contract(&SENDER1, args, || open_swap())?;
-            }
-            {
-                // approve a token on close-contract
-                hmemu::init_contract_address(&CONTRACT_TOKEN_CLOSE)?;
-                let args = {
-                    let mut args = ArgsBuilder::new();
-                    args.push(CONTRACT_SWAP);
-                    args.push(TOKEN1);
-                    args.convert_to_vec()
-                };
-                hmemu::call_contract(&SENDER2, args, || erc721::approve())?;
-            }
+            setup_swap(swap_id.clone())?;
             {
                 // close swap contract. (sender2 is closer)
                 hmemu::init_contract_address(&CONTRACT_SWAP)?;
@@ -294,6 +369,179 @@ mod tests {
                 })?;
             }
 
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn cancel_swap_test() {
+        let swap_id = b"swap2".to_vec();
+        hmemu::run_process(|| {
+            setup_swap(swap_id.clone())?;
+            {
+                // ensure that canceling swap is success before closing
+                hmemu::init_contract_address(&CONTRACT_SWAP)?;
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(swap_id.clone()); // swap_id
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER1, args, || {
+                    let _ = cancel_swap()?;
+                    Ok(())
+                })?;
+            }
+            {
+                // check if swap status is valid
+                hmemu::init_contract_address(&CONTRACT_SWAP)?;
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(swap_id.clone()); // swap_id
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER1, args, || {
+                    let status = get_swap_status()?.unwrap();
+                    assert_eq!(Some(States::CANCELED), state_from_u8(status));
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn try_cancel_after_close() {
+        let swap_id = b"swap3".to_vec();
+        hmemu::run_process(|| {
+            setup_swap(swap_id.clone())?;
+            {
+                // close swap contract. (sender2 is closer)
+                hmemu::init_contract_address(&CONTRACT_SWAP)?;
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(swap_id.clone());
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER2, args, || close_swap())?;
+            }
+            {
+                // ensure that canceling swap is failed after closing
+                hmemu::init_contract_address(&CONTRACT_SWAP)?;
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(swap_id.clone()); // swap_id
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER1, args, || {
+                    assert!(cancel_swap().is_err());
+                    Ok(())
+                })?;
+            }
+            {
+                // check if swap status is valid
+                hmemu::init_contract_address(&CONTRACT_SWAP)?;
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(swap_id.clone()); // swap_id
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER1, args, || {
+                    let status = get_swap_status()?.unwrap();
+                    assert_eq!(Some(States::CLOSED), state_from_u8(status));
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn duplicated_closing() {
+        let swap_id = b"swap4".to_vec();
+        hmemu::run_process(|| {
+            setup_swap(swap_id.clone())?;
+            {
+                // close swap contract. (sender2 is closer)
+                hmemu::init_contract_address(&CONTRACT_SWAP)?;
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(swap_id.clone());
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER2, args, || close_swap())?;
+            }
+            {
+                // close swap contract again. (sender2 is closer)
+                hmemu::init_contract_address(&CONTRACT_SWAP)?;
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(swap_id.clone());
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER2, args, || {
+                    assert!(close_swap().is_err());
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn open_duplicated_swaps() {
+        let swap_id = b"swap5".to_vec();
+        hmemu::run_process(|| {
+            setup_swap(swap_id.clone())?;
+            {
+                // open a swap contract with same swap_id. (sender1 is opener)
+                hmemu::init_contract_address(&CONTRACT_SWAP)?;
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(swap_id.clone()); // swap_id
+                    args.push(50u64); // open_value
+                    args.push(CONTRACT_TOKEN_OPEN); // open_contract
+                    args.push(TOKEN1); // close_value(tokenID)
+                    args.push(SENDER2); // close_trader
+                    args.push(CONTRACT_TOKEN_CLOSE); // close_contract
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER1, args, || {
+                    assert!(open_swap().is_err());
+                    Ok(())
+                })?;
+            }
+            {
+                // close swap contract. (sender2 is closer)
+                hmemu::init_contract_address(&CONTRACT_SWAP)?;
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(swap_id.clone());
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER2, args, || close_swap())?;
+            }
+            {
+                // open a swap contract with same swap_id again. (sender1 is opener)
+                hmemu::init_contract_address(&CONTRACT_SWAP)?;
+                let args = {
+                    let mut args = ArgsBuilder::new();
+                    args.push(swap_id.clone()); // swap_id
+                    args.push(10u64); // open_value
+                    args.push(CONTRACT_TOKEN_OPEN); // open_contract
+                    args.push(TOKEN1); // close_value(tokenID)
+                    args.push(SENDER2); // close_trader
+                    args.push(CONTRACT_TOKEN_CLOSE); // close_contract
+                    args.convert_to_vec()
+                };
+                hmemu::call_contract(&SENDER1, args, || {
+                    assert!(open_swap().is_err());
+                    Ok(())
+                })?;
+            }
             Ok(())
         })
         .unwrap();
