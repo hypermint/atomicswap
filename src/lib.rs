@@ -23,7 +23,8 @@ pub fn open_swap() -> R<i32> {
     // ERC721
     let close_contract_address: Address = api::get_arg(5)?;
 
-    if get_swap_states(&swap_id).is_some() {
+    let state = get_swap_states(&swap_id)?;
+    if state != States::NONE {
         return Err(error::from_str("this swap_id already exists"));
     }
 
@@ -74,8 +75,8 @@ pub fn get_swap_info() -> R<Vec<u8>> {
 pub fn get_swap_status() -> R<u8> {
     let swap_id: Vec<u8> = api::get_arg(0)?;
     match get_swap_states(&swap_id) {
-        Some(v) => Ok(Some(v as u8)),
-        None => Err(error::from_str("swap not found")),
+        Ok(s) => Ok(Some(s as u8)),
+        Err(e) => Err(e),
     }
 }
 
@@ -122,7 +123,7 @@ pub fn close_swap() -> R<i32> {
 
 fn check_swap_open(swap_id: &[u8]) -> Result<(), Error> {
     match get_swap_states(swap_id) {
-        Some(States::OPEN) => Ok(()),
+        Ok(States::OPEN) => Ok(()),
         s => Err(error::from_str(format!(
             "swap state must be OPEN, but got {:?}",
             s
@@ -146,7 +147,7 @@ fn get_swap(swap_id: &[u8]) -> Result<Swap, Error> {
 #[derive(Debug, PartialEq)]
 #[repr(u8)]
 enum States {
-    INVALID,
+    NONE,
     OPEN,
     CLOSED,
     CANCELED,
@@ -155,7 +156,7 @@ enum States {
 fn state_from_u8(n: u8) -> Option<States> {
     use States::*;
     match n {
-        0 => Some(INVALID),
+        0 => Some(NONE),
         1 => Some(OPEN),
         2 => Some(CLOSED),
         3 => Some(CANCELED),
@@ -168,11 +169,14 @@ fn set_swap_states(swap_id: &[u8], state: States) {
     api::write_state(&key, &[state as u8])
 }
 
-fn get_swap_states(swap_id: &[u8]) -> Option<States> {
+fn get_swap_states(swap_id: &[u8]) -> Result<States, Error> {
     let key = make_swap_states_key(swap_id);
     match api::read_state::<Vec<u8>>(&key) {
-        Ok(v) => state_from_u8(v[0]),
-        Err(_) => None,
+        Ok(v) => match state_from_u8(v[0]) {
+            Some(s) => Ok(s),
+            None => Err(error::from_str("invalid state")),
+        },
+        Err(_) => Ok(States::NONE),
     }
 }
 
@@ -260,6 +264,20 @@ mod tests {
                 args.convert_to_vec()
             };
             hmemu::call_contract(&SENDER1, args, || erc20::approve())?;
+        }
+        {
+            // ensure that our swap id is unused
+            hmemu::init_contract_address(&CONTRACT_TOKEN_OPEN)?;
+            let args = {
+                let mut args = ArgsBuilder::new();
+                args.push(swap_id.clone()); // swap_id
+                args.convert_to_vec()
+            };
+            hmemu::call_contract(&SENDER1, args, || {
+                let status = get_swap_status()?;
+                assert_eq!(Some(0u8), status);
+                Ok(())
+            })?;
         }
         {
             // open a swap contract. (sender1 is opener)
